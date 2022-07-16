@@ -35,7 +35,9 @@ func main() {
 	// pass it to Map,
 	// accumulate the intermediate Map output.
 	//
+	// 中间键值对列表
 	intermediate := []mr.KeyValue{}
+	// 读取每个文件并执行map函数得到中间键值对
 	for _, filename := range os.Args[2:] {
 		file, err := os.Open(filename)
 		if err != nil {
@@ -46,6 +48,7 @@ func main() {
 			log.Fatalf("cannot read %v", filename)
 		}
 		file.Close()
+		// 执行map函数
 		kva := mapf(filename, string(content))
 		intermediate = append(intermediate, kva...)
 	}
@@ -56,6 +59,7 @@ func main() {
 	// rather than being partitioned into NxM buckets.
 	//
 
+	// 对中间件按键值排序
 	sort.Sort(ByKey(intermediate))
 
 	oname := "mr-out-0"
@@ -72,9 +76,11 @@ func main() {
 			j++
 		}
 		values := []string{}
+		// 将同一键名的值放入列表values[]
 		for k := i; k < j; k++ {
 			values = append(values, intermediate[k].Value)
 		}
+		// 执行reduce函数
 		output := reducef(intermediate[i].Key, values)
 
 		// this is the correct format for each line of Reduce output.
@@ -86,6 +92,7 @@ func main() {
 	ofile.Close()
 }
 
+// 加载插件提取map和reduce函数
 //
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so

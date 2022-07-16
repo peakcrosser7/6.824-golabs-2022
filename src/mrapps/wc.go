@@ -22,9 +22,11 @@ func Map(filename string, contents string) []mr.KeyValue {
 	// function to detect word separators.
 	ff := func(r rune) bool { return !unicode.IsLetter(r) }
 
+	// 文件内容以非单词字符进行划分
 	// split contents into an array of words.
 	words := strings.FieldsFunc(contents, ff)
 
+	// 遍历每个单词并将每个计数为1
 	kva := []mr.KeyValue{}
 	for _, w := range words {
 		kv := mr.KeyValue{w, "1"}
@@ -39,6 +41,7 @@ func Map(filename string, contents string) []mr.KeyValue {
 // any map task.
 //
 func Reduce(key string, values []string) string {
+	// 同一单词为键的值列表长度即该单词的个数
 	// return the number of occurrences of this word.
 	return strconv.Itoa(len(values))
 }
