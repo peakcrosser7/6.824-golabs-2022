@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -18,6 +20,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -38,74 +48,142 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	workerId, nReduce := callWorkerId()
 	for {
-
 		task := callAskTask(workerId, nReduce, mapf, reducef)
 
 		switch task.TaskType {
 		case MAP_TASK:
-			fmt.Printf("get a Map task:%v, files:%v\n", task.TaskId, task.FileLocs)
-			var intermediate []KeyValue
-			for _, filename := range task.FileLocs {
-				file, err := os.Open(filename)
-				if err != nil {
-					log.Fatalf("cannot open %v", filename)
-				}
-				content, err := ioutil.ReadAll(file)
-				if err != nil {
-					log.Fatalf("cannot read %v", filename)
-				}
-				file.Close()
-				kva := mapf(filename, string(content))
-				intermediate = append(intermediate, kva...)
-			}
-			interBuckets := make([][]KeyValue, nReduce)
-			for _, kv := range intermediate {
-				i := ihash(kv.Key) % nReduce
-				interBuckets[i] = append(interBuckets[i], kv)
-			}
-			interLocs := make([]string, 0, nReduce)
-			for i := 0; i < nReduce; i++ {
-				tempFile, err := ioutil.TempFile(".", "mr-t-")
-				if err != nil {
-					log.Fatalf("cannot create temp file")
-				}
-				enc := json.NewEncoder(tempFile)
-				if len(interBuckets[i]) == 0 {
-					continue
-				}
-
-				for _, kv := range interBuckets[i] {
-					if err := enc.Encode(&kv); err != nil {
-						log.Fatalf("cannot encode %v to json\n", kv)
-					}
-				}
-				interFilename := "mr-" + strconv.Itoa(task.TaskId) + "-" + strconv.Itoa(i)
-				if os.Rename(tempFile.Name(), interFilename) != nil {
-					log.Fatalf("cannot rename temp file %v to %v\n", tempFile.Name(), interFilename)
-				}
-				interLocs = append(interLocs, interFilename)
-			}
-			fmt.Printf("create inter files: %v\n", interLocs)
-			callPushInterLocs(task.TaskId, interLocs)
-
+			processMapTask(mapf, task, nReduce)
 		case REDUCE_TASK:
-
+			processReduceTask(reducef, task)
 		case WAITING_TASK:
-			fmt.Printf("worker %v got a waiting task", task.TaskId)
-			return
+			fmt.Printf("worker %v got a waiting task\n", task.TaskId)
+			time.Sleep(3 * time.Second)
 		}
 	}
-	return
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
+}
+
+func keepAlive(workerId int, stopChan chan struct{}) {
+	go func() {
+		for {
+			select {
+			case <-stopChan:
+				fmt.Printf("keep alive goroutine exit\n")
+				return
+			case <-time.After(ALIVE_TIME >> 1):
+				callKeepAlive(workerId)
+			}
+		}
+	}()
+}
+
+func workerExit() {
+	fmt.Printf("worker exit")
+	os.Exit(0)
+}
+
+func processMapTask(mapf func(string, string) []KeyValue,
+	task *TaskStruct, nReduce int) {
+	fmt.Printf("get a Map task:%v, files:%v\n", task.TaskId, task.FileLocs)
+
+	var intermediate []KeyValue
+	for _, filename := range task.FileLocs {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+		kva := mapf(filename, string(content))
+		intermediate = append(intermediate, kva...)
+	}
+	interBuckets := make([][]KeyValue, nReduce)
+	for _, kv := range intermediate {
+		i := ihash(kv.Key) % nReduce
+		interBuckets[i] = append(interBuckets[i], kv)
+	}
+	interLocs := make([]string, 0, nReduce)
+	for i := 0; i < nReduce; i++ {
+		tempFile, err := ioutil.TempFile(".", "mr-t-")
+		if err != nil {
+			log.Fatalf("cannot create temp file")
+		}
+		enc := json.NewEncoder(tempFile)
+		if len(interBuckets[i]) == 0 {
+			continue
+		}
+
+		for _, kv := range interBuckets[i] {
+			if err := enc.Encode(&kv); err != nil {
+				log.Fatalf("cannot encode %v to json\n", kv)
+			}
+		}
+		tempFile.Close()
+		interFilename := "mr-" + strconv.Itoa(task.TaskId) + "-" + strconv.Itoa(i)
+		if os.Rename(tempFile.Name(), interFilename) != nil {
+			log.Fatalf("cannot rename temp file %v to %v\n", tempFile.Name(), interFilename)
+		}
+		interLocs = append(interLocs, interFilename)
+	}
+	fmt.Printf("create inter files: %v\n", interLocs)
+
+	callFinMap(task.TaskId, interLocs)
+}
+
+func processReduceTask(reducef func(string, []string) string, task *TaskStruct) {
+	fmt.Printf("get a Reduce task:%v, files:%v\n", task.TaskId, task.FileLocs)
+	var intermediate []KeyValue
+	for _, filename := range task.FileLocs {
+		file, err := os.Open(filename)
+		if err != nil {
+			fmt.Printf("cannot open file %v\n", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + strconv.Itoa(task.TaskId)
+	ofile, _ := os.Create(oname)
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		var values []string
+		// 将同一键名的值放入列表values[]
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		// 执行reduce函数
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	callFinReduce(task.TaskId)
 }
 
 func callWorkerId() (int, int) {
 	args := AskWorkerIdArgs{}
 	reply := AskWorkerIdReply{}
 	if ok := call("Coordinator.AskWorkerId", &args, &reply); !ok {
-		log.Fatal("AskWorkerId error")
+		workerExit()
 	}
 	fmt.Printf("Get a workerId: %v, nReduce: %v\n", reply.WorkerId, reply.NReduce)
 	return reply.WorkerId, reply.NReduce
@@ -119,20 +197,43 @@ func callAskTask(workerId int, nReduce int, mapf func(string, string) []KeyValue
 	reply := AskTaskReply{}
 
 	if ok := call("Coordinator.AskTask", &args, &reply); !ok {
-		return nil
+		workerExit()
 	}
 	fmt.Printf("worker %v ask for a task\n", workerId)
 	return reply.Task
 }
 
-func callPushInterLocs(taskId int, interLocs []string) {
-	args := PushInterLocsArgs{
+func callFinMap(taskId int, interLocs []string) {
+	args := FinMapArgs{
 		TaskId:    taskId,
 		InterLocs: interLocs,
 	}
-	reply := PushInterLocsReply{}
-	_ = call("Coordinator.PushInterLocs", &args, &reply)
-	fmt.Printf("pushInstrLocs\n")
+	reply := FinMapReply{}
+	if ok := call("Coordinator.FinMap", &args, &reply); !ok {
+		workerExit()
+	}
+	fmt.Printf("fin map\n")
+}
+
+func callFinReduce(taskId int) {
+	args := FinReduceArgs{
+		TaskId: taskId,
+	}
+	reply := FinReduceReply{}
+	if ok := call("Coordinator.FinReduce", &args, &reply); !ok {
+		workerExit()
+	}
+	fmt.Printf("fin reduce")
+}
+
+func callKeepAlive(workerId int) {
+	args := KeepAliveArgs{
+		WorkerId: workerId,
+	}
+	reply := KeepAliveReply{}
+	if ok := call("Coordinator.KeepAlive", &args, &reply); !ok {
+		workerExit()
+	}
 }
 
 //

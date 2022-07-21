@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 import "net"
@@ -20,13 +21,14 @@ const (
 	TASK_COMPLETED
 )
 
+const ALIVE_TIME = 10 * time.Second
+
 type TaskType uint8
 
 const (
 	MAP_TASK TaskType = iota
 	REDUCE_TASK
 	WAITING_TASK
-	NO_TASK
 )
 
 type TaskStruct struct {
@@ -100,20 +102,10 @@ func (c *Coordinator) AskTask(args *AskTaskArgs, reply *AskTaskReply) error {
 	}
 	c.taskMu.Unlock()
 
-	reply.Task = &TaskStruct{
-		TaskType: WAITING_TASK,
-	}
-	c.taskMu.Lock()
-	c.taskLeft = 0
-	c.taskMu.Unlock()
-	fmt.Printf("send a WAITING to worker %v\n", args.WorkerId)
-	return nil
-
 	if !allCompleted {
 		reply.Task = &TaskStruct{
 			TaskType: WAITING_TASK,
 		}
-		c.taskLeft--
 		fmt.Printf("send a WAITING to worker %v\n", args.WorkerId)
 		return nil
 	}
@@ -129,13 +121,20 @@ func (c *Coordinator) AskTask(args *AskTaskArgs, reply *AskTaskReply) error {
 				FileLocs: c.interLocs[i],
 			}
 			fmt.Printf("send a Reduce task %v to worker %v\n", i, args.WorkerId)
+			c.taskMu.Unlock()
 			return nil
 		}
 	}
+	c.taskMu.Unlock()
+
+	reply.Task = &TaskStruct{
+		TaskType: WAITING_TASK,
+	}
+	fmt.Printf("send a WAITING to worker %v\n", args.WorkerId)
 	return nil
 }
 
-func (c *Coordinator) PushInterLocs(args *PushInterLocsArgs, reply *PushInterLocsReply) error {
+func (c *Coordinator) FinMap(args *FinMapArgs, reply *FinMapReply) error {
 	c.interMu.Lock()
 	for i, locs := range args.InterLocs {
 		c.interLocs[i] = append(c.interLocs[i], locs)
@@ -145,7 +144,16 @@ func (c *Coordinator) PushInterLocs(args *PushInterLocsArgs, reply *PushInterLoc
 	c.taskMu.Lock()
 	c.mapTaskStates[args.TaskId] = TASK_COMPLETED
 	c.taskMu.Unlock()
-	fmt.Printf("task %v is completed\n", args.TaskId)
+	fmt.Printf("map task %v is completed\n", args.TaskId)
+	return nil
+}
+
+func (c *Coordinator) FinReduce(args *FinReduceArgs, reply *FinReduceReply) error {
+	c.taskMu.Lock()
+	c.reduceTaskStates[args.TaskId] = TASK_COMPLETED
+	c.taskLeft--
+	c.taskMu.Unlock()
+	fmt.Printf("reduce task %v is completed\n", args.TaskId)
 	return nil
 }
 
@@ -213,7 +221,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.interLocs = make([][]string, nReduce)
 	}
 	c.workerId = 0
-	c.taskLeft = len(files)
+	c.taskLeft = nReduce
 
 	fmt.Printf("coordinator init\n")
 	c.server()

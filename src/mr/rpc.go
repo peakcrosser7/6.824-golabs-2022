@@ -40,12 +40,26 @@ type AskTaskReply struct {
 	Task *TaskStruct
 }
 
-type PushInterLocsArgs struct {
+type FinMapArgs struct {
 	TaskId    int
 	InterLocs []string
 }
 
-type PushInterLocsReply struct {
+type FinMapReply struct {
+}
+
+type FinReduceArgs struct {
+	TaskId int
+}
+
+type FinReduceReply struct {
+}
+
+type KeepAliveArgs struct {
+	WorkerId int
+}
+
+type KeepAliveReply struct {
 }
 
 // Cook up a unique-ish UNIX-domain socket name
