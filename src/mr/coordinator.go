@@ -43,19 +43,25 @@ const (
 	NEW_WORKER WorkerType = iota
 	MAP_WORKER
 	REDUCE_WORKER
-	CLOSED_WORKER
+	FAILED_WORKER
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	inputFiles       []string
+	inputFiles []string
+
 	taskMu           sync.Mutex
 	mapTaskStates    []TaskStateType
 	reduceTaskStates []TaskStateType
 
-	idMu         sync.Mutex
-	workerId     int
-	workersTypes []WorkerType
+	workerMu    sync.Mutex
+	workerId    int
+	workerTypes []WorkerType
+	workerAlive []chan struct{}
+
+	mapTasks    [][]int
+	reduceTasks map[int]int
+	aliveMu     sync.Mutex
 
 	interMu   sync.Mutex
 	interLocs [][]string
@@ -66,14 +72,17 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) AskWorkerId(args *AskWorkerIdArgs, reply *AskWorkerIdReply) error {
-	c.idMu.Lock()
-	defer c.idMu.Unlock()
-	reply.WorkerId = c.workerId
 	reply.NReduce = len(c.reduceTaskStates)
 
-	c.workersTypes = append(c.workersTypes, NEW_WORKER)
+	c.workerMu.Lock()
+	reply.WorkerId = c.workerId
 	fmt.Printf("send a workerId %v and nReduce %v\n", c.workerId, reply.NReduce)
 	c.workerId++
+	c.workerTypes = append(c.workerTypes, NEW_WORKER)
+	c.workerAlive = append(c.workerAlive, nil)
+	c.mapTasks = append(c.mapTasks, make([]int, 0))
+	c.workerMu.Unlock()
+
 	return nil
 }
 
@@ -86,8 +95,10 @@ func (c *Coordinator) AskTask(args *AskTaskArgs, reply *AskTaskReply) error {
 	allCompleted := true
 	for i := 0; i < len(c.mapTaskStates); i++ {
 		if c.mapTaskStates[i] == TASK_IDLE {
-			c.workersTypes[args.WorkerId] = MAP_WORKER
+			c.workerTypes[args.WorkerId] = MAP_WORKER
 			c.mapTaskStates[i] = TASK_INPROGRESS
+
+			c.mapTasks[args.WorkerId] = append(c.mapTasks[args.WorkerId], i)
 			reply.Task = &TaskStruct{
 				TaskType: MAP_TASK,
 				TaskId:   i,
@@ -113,7 +124,8 @@ func (c *Coordinator) AskTask(args *AskTaskArgs, reply *AskTaskReply) error {
 	c.taskMu.Lock()
 	for i := 0; i < len(c.reduceTaskStates); i++ {
 		if c.reduceTaskStates[i] == TASK_IDLE {
-			c.workersTypes[args.WorkerId] = REDUCE_WORKER
+			c.workerTypes[args.WorkerId] = REDUCE_WORKER
+			c.reduceTasks[args.WorkerId] = i
 			c.reduceTaskStates[i] = TASK_INPROGRESS
 			reply.Task = &TaskStruct{
 				TaskType: REDUCE_TASK,
@@ -154,6 +166,45 @@ func (c *Coordinator) FinReduce(args *FinReduceArgs, reply *FinReduceReply) erro
 	c.taskLeft--
 	c.taskMu.Unlock()
 	fmt.Printf("reduce task %v is completed\n", args.TaskId)
+	return nil
+}
+
+func (c *Coordinator) KeepAlive(args *KeepAliveArgs, reply *KeepAliveReply) error {
+	workerId := args.WorkerId
+	if c.workerAlive[workerId] != nil {
+		c.workerAlive[workerId] <- struct{}{}
+	} else {
+		aliveChan := make(chan struct{})
+		c.workerMu.Lock()
+		c.workerAlive[workerId] = aliveChan
+		c.workerMu.Unlock()
+		go func() {
+			for {
+				select {
+				case <-aliveChan:
+					fmt.Printf("worker %v is alive\n", workerId)
+				case <-time.After(ALIVE_TIME):
+					fmt.Printf("worker %v is crashed\n", workerId)
+					switch c.workerTypes[workerId] {
+					case REDUCE_WORKER:
+						c.reduceTaskStates[c.reduceTasks[workerId]] = TASK_IDLE
+						delete(c.reduceTasks, workerId)
+						fallthrough
+					case MAP_WORKER:
+						c.taskMu.Lock()
+						for _, taskId := range c.mapTasks[workerId] {
+							c.mapTaskStates[taskId] = TASK_IDLE
+						}
+						c.mapTasks[workerId] = c.mapTasks[workerId][:0]
+						c.taskMu.Unlock()
+					}
+					c.workerTypes[workerId] = FAILED_WORKER
+					aliveChan = nil
+					return
+				}
+			}
+		}()
+	}
 	return nil
 }
 
@@ -220,7 +271,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.reduceTaskStates[i] = TASK_IDLE
 		c.interLocs = make([][]string, nReduce)
 	}
+
 	c.workerId = 0
+
+	c.mapTasks = make([][]int, 0)
+	c.reduceTasks = make(map[int]int)
 	c.taskLeft = nReduce
 
 	fmt.Printf("coordinator init\n")

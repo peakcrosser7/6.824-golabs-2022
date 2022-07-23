@@ -47,9 +47,11 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	workerId, nReduce := callWorkerId()
+	keepAlive(workerId)
+
 	for {
 		task := callAskTask(workerId, nReduce, mapf, reducef)
-
+		time.Sleep(2 * time.Second)
 		switch task.TaskType {
 		case MAP_TASK:
 			processMapTask(mapf, task, nReduce)
@@ -65,16 +67,12 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-func keepAlive(workerId int, stopChan chan struct{}) {
+func keepAlive(workerId int) {
 	go func() {
 		for {
-			select {
-			case <-stopChan:
-				fmt.Printf("keep alive goroutine exit\n")
-				return
-			case <-time.After(ALIVE_TIME >> 1):
-				callKeepAlive(workerId)
-			}
+			callKeepAlive(workerId)
+			fmt.Printf("worker %v keep alive\n", workerId)
+			time.Sleep(ALIVE_TIME >> 1)
 		}
 	}()
 }
